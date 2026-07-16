@@ -1,0 +1,37 @@
+name: Scrape DxE Blog
+
+on:
+  workflow_dispatch: {}      # lets you click "Run workflow" manually on GitHub
+  schedule:
+    - cron: "0 13 * * 1"     # also runs automatically every Monday 1pm UTC
+
+permissions:
+  contents: write
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Run scraper
+        run: python scrape.py
+
+      - name: Commit updated posts.json
+        run: |
+          git config user.name "dxe-blog-bot"
+          git config user.email "actions@github.com"
+          git add docs/posts.json
+          git diff --quiet --cached || git commit -m "Update scraped blog posts"
+          git push
