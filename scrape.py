@@ -126,6 +126,20 @@ def scrape_post(page, url: str) -> dict:
     except Exception:
         pass
 
+    # Author and date come from structured "Author:" / "Published on:"
+    # labels that sit right before the title (e.g. "Author:\nCassie King\n
+    # Published on:\nMarch 19, 2026"). Extract these from the full text
+    # BEFORE trimming to the post body below, since that trim discards
+    # everything before the title — which is exactly where these live.
+    lines = [l.strip() for l in full_text.split("\n") if l.strip()]
+    author = ""
+    date = ""
+    for i, line in enumerate(lines):
+        if line == "Author:" and i + 1 < len(lines):
+            author = lines[i + 1]
+        elif line == "Published on:" and i + 1 < len(lines):
+            date = lines[i + 1]
+
     # Trim boilerplate: keep everything from the title to the footer marker.
     body = full_text
     if title and title in body:
@@ -134,22 +148,23 @@ def scrape_post(page, url: str) -> dict:
         body = body.split(FOOTER_MARKER, 1)[0]
     body = re.sub(r"\n{3,}", "\n\n", body).strip()
 
-    # Best-effort date extraction: the publish date reliably appears within
-    # the first ~150 characters right after the title (before the byline
-    # image caption and article body, which may mention unrelated dates).
-    date_match = re.search(
-        r"(January|February|March|April|May|June|July|August|September|October|November|December) \d{1,2}, \d{4}",
-        body[:150],
-    )
-    date = date_match.group(0) if date_match else ""
+    # Fallback: if the structured "Published on:" label wasn't found for
+    # some reason, fall back to scanning the first ~150 characters of the
+    # body for a date-shaped string.
+    if not date:
+        date_match = re.search(
+            r"(January|February|March|April|May|June|July|August|September|October|November|December) \d{1,2}, \d{4}",
+            body[:150],
+        )
+        date = date_match.group(0) if date_match else ""
 
     return {
         "title": title,
+        "author": author,
         "date": date,
         "url": url,
         "body": body,
     }
-
 
 def main():
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
