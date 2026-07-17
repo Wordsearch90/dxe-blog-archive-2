@@ -2,10 +2,12 @@
 Scrapes every blog post from the DxE "News" page (Blog tab) at
 https://www.directactioneverywhere.com/news
 
-The blog listing paginates via client-side JavaScript (Finsweet/Webflow),
-so this uses a real headless browser (Playwright) to click through every
-page, collect each post's URL, then visits each post individually to pull
-its title, date, and full body text.
+The blog listing paginates via a URL query param (?f09b7e50_page=N) that's
+read by client-side JS (Finsweet/Webflow) on load, so this uses a real
+headless browser (Playwright) — navigating directly to each page's URL,
+verifying it actually rendered the right page — to collect every post URL,
+then visits each post individually to pull its title, date, and full body
+text.
 
 Output: docs/posts.json — consumed by docs/index.html (the search page).
 """
@@ -23,29 +25,56 @@ FOOTER_MARKER = "Until every animal is free"
 
 
 def collect_blog_post_urls(page) -> list[str]:
-    """Click through every page of the Blog tab, collecting unique post URLs."""
+    """Visit each ?f09b7e50_page=N URL directly, collecting unique post URLs.
+
+    The Blog tab's pagination is client-side JS (Finsweet/Webflow), and its
+    "Next" links point to URLs like ?f09b7e50_page=2, ?f09b7e50_page=3, etc.
+    A real browser (unlike a plain HTTP fetch) executes that JS on load and
+    reads the URL to render the right page directly — so instead of clicking
+    "Next" repeatedly, we can just navigate straight to each page number.
+    """
     urls: list[str] = []
     seen = set()
 
-    page.goto(NEWS_URL, wait_until="networkidle")
+    def get_counter(page):
+        # Webflow's built-in ".w-page-count" a11y element, e.g.
+        # aria-label="Page 3 of 77". It's visually hidden by design, so we
+        # read its attribute/text directly rather than waiting for visibility.
+        counter = page.get_by_text("/ 77", exact=False).first
+        counter.wait_for(state="attached", timeout=15000)
+        return counter
 
-    # The Blog section's pagination counter looks like "1 / 77", "2 / 77", etc.
-    # That "/ 77" fragment is unique to the Blog tab (the other three tabs on
-    # this page show "/ 145", "/ 10", and "/ 18"), so anchoring on it — rather
-    # than on a /dxe-in-the-news/ link, which also appears in other sections —
-    # reliably scopes us to the right container and its real "Next" button.
-    counter = page.get_by_text("/ 77", exact=False).first
-    counter.wait_for(state="visible", timeout=15000)
-    total_pages_text = counter.inner_text()
-    total_pages = int(total_pages_text.split("/")[-1].strip())
+    # First, load page 1 to discover the real total page count.
+    page.goto(NEWS_URL, wait_until="networkidle")
+    counter = get_counter(page)
+    aria_label = counter.get_attribute("aria-label") or ""
+    match = re.search(r"of (\d+)", aria_label)
+    total_pages = int(match.group(1)) if match else int(counter.text_content().split("/")[-1].strip())
     print(f"  Blog section reports {total_pages} total pages")
 
-    section = counter.locator(
-        "xpath=ancestor::*[self::div or self::section][.//a[contains(@href,'/dxe-in-the-news/')]][1]"
-    ).first
+    for page_num in range(1, total_pages + 1):
+        url = f"{NEWS_URL}?f09b7e50_page={page_num}"
+        page.goto(url, wait_until="networkidle")
 
-    page_num = 1
-    while True:
+        # Confirm the page actually advanced to the number we asked for.
+        # If not (this site's CDN has occasionally served a stale/cached
+        # page for a given query param), force a hard reload and recheck
+        # once before giving up on this page.
+        counter = get_counter(page)
+        expected = f"Page {page_num} of"
+        actual = counter.get_attribute("aria-label") or ""
+        if not actual.startswith(expected):
+            print(f"  page {page_num}: got '{actual}', forcing reload and retrying...")
+            page.reload(wait_until="networkidle")
+            counter = get_counter(page)
+            actual = counter.get_attribute("aria-label") or ""
+            if not actual.startswith(expected):
+                print(f"  page {page_num}: still showing '{actual}' after retry — skipping this page")
+                continue
+
+        section = counter.locator(
+            "xpath=ancestor::*[self::div or self::section][.//a[contains(@href,'/dxe-in-the-news/')]][1]"
+        ).first
         links = section.locator("a[href*='/dxe-in-the-news/']")
         count = links.count()
         for i in range(count):
@@ -57,36 +86,6 @@ def collect_blog_post_urls(page) -> list[str]:
                 urls.append(href)
 
         print(f"  page {page_num}/{total_pages}: {len(urls)} unique posts so far")
-
-        if page_num >= total_pages:
-            break
-
-        next_button = section.get_by_text("Next", exact=True)
-        if next_button.count() == 0:
-            print("  no Next button found — stopping early")
-            break
-
-        try:
-            next_button.first.click()
-            # Wait for the counter to actually advance before scraping again,
-            # rather than guessing with a fixed delay.
-            page.wait_for_function(
-                """([expectedPrefix, totalSuffix]) => {
-                    const els = [...document.querySelectorAll('*')].filter(
-                        el => el.children.length === 0 && el.textContent.includes(totalSuffix)
-                    );
-                    return els.some(el => el.textContent.trim().startsWith(expectedPrefix));
-                }""",
-                arg=[f"{page_num + 1} /", f"/ {total_pages}"],
-                timeout=10000,
-            )
-        except Exception as e:
-            print(f"  stopping: couldn't advance past page {page_num} ({e})")
-            break
-
-        page_num += 1
-        if page_num > 200:  # safety valve
-            break
 
     return urls
 
