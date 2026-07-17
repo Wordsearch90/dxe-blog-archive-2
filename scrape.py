@@ -37,6 +37,16 @@ def collect_blog_post_urls(page) -> list[str]:
 
     page.goto(NEWS_URL, wait_until="networkidle")
 
+    # This page has 4 tabs (All / Top Press / Blog / Press Releases), and
+    # each tab's content — including its Next button — is hidden until that
+    # tab is activated. Reading the counter's aria-label worked fine while
+    # hidden (attribute reads don't require visibility), but clicking the
+    # Next button does, which is what caused the previous failure. Click
+    # the "Blog" tab first to reveal its section.
+    blog_tab = page.get_by_text("Blog", exact=True).first
+    blog_tab.click()
+    page.wait_for_timeout(500)  # let the tab-switch animation/render settle
+    
     # Find the Blog tab's counter specifically. There are 4 ".w-page-count"
     # widgets on this page (All News, Top Press, Blog, Press Releases), so
     # we can't just take .first of that class — instead match on its text,
