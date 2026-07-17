@@ -2,12 +2,10 @@
 Scrapes every blog post from the DxE "News" page (Blog tab) at
 https://www.directactioneverywhere.com/news
 
-The blog listing paginates via a URL query param (?f09b7e50_page=N) that's
-read by client-side JS (Finsweet/Webflow) on load, so this uses a real
-headless browser (Playwright) — navigating directly to each page's URL,
-verifying it actually rendered the right page — to collect every post URL,
-then visits each post individually to pull its title, date, and full body
-text.
+The blog listing paginates via a Webflow-native widget whose "Next" button
+re-renders the list client-side. This uses a real headless browser
+(Playwright) to click through every page, collecting every post's URL, then
+visits each post individually to pull its title, date, and full body text.
 
 Output: docs/posts.json — consumed by docs/index.html (the search page).
 """
@@ -25,56 +23,51 @@ FOOTER_MARKER = "Until every animal is free"
 
 
 def collect_blog_post_urls(page) -> list[str]:
-    """Visit each ?f09b7e50_page=N URL directly, collecting unique post URLs.
+    """Click through the Blog tab's pagination, collecting unique post URLs.
 
-    The Blog tab's pagination is client-side JS (Finsweet/Webflow), and its
-    "Next" links point to URLs like ?f09b7e50_page=2, ?f09b7e50_page=3, etc.
-    A real browser (unlike a plain HTTP fetch) executes that JS on load and
-    reads the URL to render the right page directly — so instead of clicking
-    "Next" repeatedly, we can just navigate straight to each page number.
+    Direct URL navigation (?f09b7e50_page=N) turned out to be unreliable:
+    this site's CDN appears to cache the first page variant it sees and
+    then serve that same cached response for other page numbers too. But
+    clicking "Next" on this Webflow-native pagination widget re-renders
+    the list client-side without a fresh page-level HTTP request, so it
+    sidesteps that caching bug entirely.
     """
     urls: list[str] = []
     seen = set()
 
-    def get_counter(page):
-        # Webflow's built-in ".w-page-count" a11y element, e.g.
-        # aria-label="Page 3 of 77". It's visually hidden by design, so we
-        # read its attribute/text directly rather than waiting for visibility.
-        counter = page.get_by_text("/ 77", exact=False).first
-        counter.wait_for(state="attached", timeout=15000)
-        return counter
-
-    # First, load page 1 to discover the real total page count.
     page.goto(NEWS_URL, wait_until="networkidle")
-    counter = get_counter(page)
+
+    # Find the Blog tab's counter specifically. There are 4 ".w-page-count"
+    # widgets on this page (All News, Top Press, Blog, Press Releases), so
+    # we can't just take .first of that class — instead match on its text,
+    # which reliably identifies the Blog one (e.g. "1 / 77", vs "1 / 145",
+    # "1 / 10", "1 / 18" for the others). Confirmed via aria-label
+    # "Page 1 of 77" in earlier testing. It's visually hidden by design
+    # (a11y-only), so we read its attribute directly rather than waiting
+    # for visibility.
+    counter = page.get_by_text("/ 77", exact=False).first
+    counter.wait_for(state="attached", timeout=15000)
     aria_label = counter.get_attribute("aria-label") or ""
     match = re.search(r"of (\d+)", aria_label)
-    total_pages = int(match.group(1)) if match else int(counter.text_content().split("/")[-1].strip())
+    if not match:
+        raise RuntimeError(f"Couldn't parse total page count from '{aria_label}'")
+    total_pages = int(match.group(1))
     print(f"  Blog section reports {total_pages} total pages")
 
+    # The pagination wrapper (containing the counter and the Next/Previous
+    # buttons) is a nearby ancestor of the counter. Climb up until we find
+    # one that also contains a "Next" text element.
+    wrapper = counter.locator(
+        "xpath=ancestor::*[.//text()[contains(., 'Next')]][1]"
+    ).first
+
+    # The post links live in a sibling container of the pagination wrapper.
+    # Climb further up to the common ancestor that holds both.
+    section = wrapper.locator(
+        "xpath=ancestor::*[.//a[contains(@href,'/dxe-in-the-news/')]][1]"
+    ).first
+
     for page_num in range(1, total_pages + 1):
-        url = f"{NEWS_URL}?f09b7e50_page={page_num}"
-        page.goto(url, wait_until="networkidle")
-
-        # Confirm the page actually advanced to the number we asked for.
-        # If not (this site's CDN has occasionally served a stale/cached
-        # page for a given query param), force a hard reload and recheck
-        # once before giving up on this page.
-        counter = get_counter(page)
-        expected = f"Page {page_num} of"
-        actual = counter.get_attribute("aria-label") or ""
-        if not actual.startswith(expected):
-            print(f"  page {page_num}: got '{actual}', forcing reload and retrying...")
-            page.reload(wait_until="networkidle")
-            counter = get_counter(page)
-            actual = counter.get_attribute("aria-label") or ""
-            if not actual.startswith(expected):
-                print(f"  page {page_num}: still showing '{actual}' after retry — skipping this page")
-                continue
-
-        section = counter.locator(
-            "xpath=ancestor::*[self::div or self::section][.//a[contains(@href,'/dxe-in-the-news/')]][1]"
-        ).first
         links = section.locator("a[href*='/dxe-in-the-news/']")
         count = links.count()
         for i in range(count):
@@ -86,6 +79,25 @@ def collect_blog_post_urls(page) -> list[str]:
                 urls.append(href)
 
         print(f"  page {page_num}/{total_pages}: {len(urls)} unique posts so far")
+
+        if page_num >= total_pages:
+            break
+
+        next_button = wrapper.get_by_text("Next", exact=True)
+        if next_button.count() == 0:
+            print("  no Next button found — stopping early")
+            break
+
+        next_button.first.click()
+        try:
+            page.wait_for_function(
+                """(el, expected) => el.getAttribute('aria-label') === expected""",
+                arg=[counter.element_handle(), f"Page {page_num + 1} of {total_pages}"],
+                timeout=10000,
+            )
+        except Exception as e:
+            print(f"  stopping: page didn't advance past {page_num} ({e})")
+            break
 
     return urls
 
@@ -150,6 +162,16 @@ def main():
 
     OUTPUT_PATH.write_text(json.dumps(posts, indent=2, ensure_ascii=False))
     print(f"Saved {len(posts)} posts to {OUTPUT_PATH}")
+
+    # Sanity check: with ~9 posts per page, a near-complete scrape should
+    # land well over 500 posts. If it's far short, something broke (e.g.
+    # pagination stalled) — fail the job loudly instead of silently
+    # "succeeding" with a small, misleading dataset.
+    if len(posts) < 300:
+        raise RuntimeError(
+            f"Only scraped {len(posts)} posts — expected several hundred. "
+            "Failing the job so this doesn't look like a clean success."
+        )
 
 
 if __name__ == "__main__":
