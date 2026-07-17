@@ -101,14 +101,17 @@ def collect_blog_post_urls(page) -> list[str]:
         next_button.first.click()
         try:
             page.wait_for_function(
-                """(el, expected) => el.getAttribute('aria-label') === expected""",
-                arg=[counter.element_handle(), f"Page {page_num + 1} of {total_pages}"],
+                """(expected) => {
+                    const els = document.querySelectorAll('.w-page-count');
+                    return [...els].some(el => el.getAttribute('aria-label') === expected);
+                }""",
+                arg=f"Page {page_num + 1} of {total_pages}",
                 timeout=10000,
             )
         except Exception as e:
             print(f"  stopping: page didn't advance past {page_num} ({e})")
             break
-
+            
     return urls
 
 
