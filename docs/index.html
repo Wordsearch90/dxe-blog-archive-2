@@ -78,6 +78,57 @@
   #q::placeholder { color: #a6a397; }
   #q:focus { border-bottom-color: var(--moss); }
 
+  .filter-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    margin-top: 0.9rem;
+  }
+
+  .filter-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .filter-field label {
+    font-family: var(--mono);
+    font-size: 0.65rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+
+  .filter-field select,
+  .filter-field input[type="date"] {
+    font-family: var(--sans);
+    font-size: 0.85rem;
+    color: var(--ink);
+    background: #fff;
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    padding: 0.4rem 0.5rem;
+  }
+  .filter-field select:focus,
+  .filter-field input[type="date"]:focus {
+    outline: none;
+    border-color: var(--moss);
+  }
+
+  #clearFilters {
+    align-self: flex-end;
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.03em;
+    color: var(--moss);
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0.4rem 0.2rem;
+    text-decoration: underline;
+  }
+  #clearFilters:hover { color: var(--ink); }
+
   .meta-row {
     display: flex;
     justify-content: space-between;
@@ -107,6 +158,11 @@
     color: var(--moss);
     letter-spacing: 0.03em;
     text-transform: uppercase;
+  }
+
+  .post-date .byline {
+    color: var(--ink-soft);
+    text-transform: none;
   }
 
   .post h2 {
@@ -168,6 +224,23 @@
 
 <div class="search-wrap">
   <input id="q" type="text" placeholder="Search words or phrases…" autocomplete="off">
+  <div class="filter-row">
+    <div class="filter-field">
+      <label for="authorFilter">Author</label>
+      <select id="authorFilter">
+        <option value="">All authors</option>
+      </select>
+    </div>
+    <div class="filter-field">
+      <label for="dateFrom">From</label>
+      <input type="date" id="dateFrom">
+    </div>
+    <div class="filter-field">
+      <label for="dateTo">To</label>
+      <input type="date" id="dateTo">
+    </div>
+    <button id="clearFilters" type="button">Clear filters</button>
+  </div>
   <div class="meta-row">
     <span id="count">loading…</span>
     <span id="updated"></span>
@@ -206,32 +279,42 @@ function bestSnippet(body, query, radius = 90) {
   return highlight(snippet, query);
 }
 
-function render(query) {
+function render() {
   const resultsEl = document.getElementById("results");
   const countEl = document.getElementById("count");
-  const q = query.trim();
+  const q = document.getElementById("q").value.trim();
+  const author = document.getElementById("authorFilter").value;
+  const fromVal = document.getElementById("dateFrom").value;
+  const toVal = document.getElementById("dateTo").value;
+  const from = fromVal ? new Date(fromVal) : null;
+  const to = toVal ? new Date(toVal) : null;
 
-  let matches = posts;
-  if (q) {
-    const qLower = q.toLowerCase();
-    matches = posts.filter(p =>
-      (p.title && p.title.toLowerCase().includes(qLower)) ||
-      (p.body && p.body.toLowerCase().includes(qLower))
-    );
-  }
+  const qLower = q.toLowerCase();
+  const matches = posts.filter(p => {
+    if (q && !((p.title && p.title.toLowerCase().includes(qLower)) ||
+                (p.body && p.body.toLowerCase().includes(qLower)))) {
+      return false;
+    }
+    if (author && p.author !== author) return false;
+    if ((from || to) && !p._date) return false;
+    if (from && p._date < from) return false;
+    if (to && p._date > to) return false;
+    return true;
+  });
 
-  countEl.textContent = q
+  const filterActive = q || author || from || to;
+  countEl.textContent = filterActive
     ? `${matches.length} match${matches.length === 1 ? "" : "es"} of ${posts.length} posts`
     : `${posts.length} posts indexed`;
 
   if (matches.length === 0) {
-    resultsEl.innerHTML = `<div class="empty">No posts match “${escapeHtml(q)}.”</div>`;
+    resultsEl.innerHTML = `<div class="empty">No posts match these filters.</div>`;
     return;
   }
 
   resultsEl.innerHTML = matches.map(p => `
     <div class="post">
-      <div class="post-date">${escapeHtml(p.date || "")}</div>
+      <div class="post-date">${escapeHtml(p.date || "")}${p.author ? ` <span class="byline">· by ${escapeHtml(p.author)}</span>` : ""}</div>
       <h2><a href="${p.url}" target="_blank" rel="noopener">${highlight(p.title || "Untitled", q)}</a></h2>
       <div class="snippet">${bestSnippet(p.body || "", q)}</div>
     </div>
@@ -241,8 +324,22 @@ function render(query) {
 fetch("posts.json")
   .then(r => r.json())
   .then(data => {
-    posts = data.sort((a, b) => new Date(b.date) - new Date(a.date));
-    render("");
+    data.forEach(p => {
+      const d = p.date ? new Date(p.date) : null;
+      p._date = (d && !isNaN(d)) ? d : null;
+    });
+    posts = data.sort((a, b) => (b._date || 0) - (a._date || 0));
+
+    const authors = [...new Set(posts.map(p => p.author).filter(Boolean))].sort();
+    const authorSelect = document.getElementById("authorFilter");
+    authors.forEach(a => {
+      const opt = document.createElement("option");
+      opt.value = a;
+      opt.textContent = a;
+      authorSelect.appendChild(opt);
+    });
+
+    render();
   })
   .catch(err => {
     document.getElementById("results").innerHTML =
@@ -250,7 +347,17 @@ fetch("posts.json")
     console.error(err);
   });
 
-document.getElementById("q").addEventListener("input", (e) => render(e.target.value));
+document.getElementById("q").addEventListener("input", render);
+document.getElementById("authorFilter").addEventListener("change", render);
+document.getElementById("dateFrom").addEventListener("change", render);
+document.getElementById("dateTo").addEventListener("change", render);
+document.getElementById("clearFilters").addEventListener("click", () => {
+  document.getElementById("q").value = "";
+  document.getElementById("authorFilter").value = "";
+  document.getElementById("dateFrom").value = "";
+  document.getElementById("dateTo").value = "";
+  render();
+});
 </script>
 
 </body>
